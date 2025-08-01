@@ -21,6 +21,15 @@ DEV_INLINE uint32_t warp_id() { return threadIdx.x / WARP_SIZE; }
 #define LDG(x) (x)
 #endif
 
+// Optimize for newer architectures including Blackwell (compute 90+)
+#if (__CUDA_ARCH__ >= 900)
+#define ARCH_BLACKWELL 1
+#elif (__CUDA_ARCH__ >= 800)
+#define ARCH_AMPERE 1
+#elif (__CUDA_ARCH__ >= 750)
+#define ARCH_TURING 1
+#endif
+
 #ifdef __CUDA_ARCH__
 DEV_INLINE uint64_t cuda_swab64(const uint64_t x) {
   uint64_t result;
@@ -44,8 +53,34 @@ DEV_INLINE uint64_t cuda_swab64(const uint64_t x) {
               (((uint64_t)(x)&0x00000000000000ffULL) << 56)))
 #endif
 
-// 64-bit ROTATE RIGHT
-#if __CUDA_ARCH__ >= 320 && USE_ROT_ASM_OPT == 1
+// 64-bit ROTATE RIGHT - Optimized for different architectures
+#if defined(ARCH_BLACKWELL) && USE_ROT_ASM_OPT == 1
+/* Blackwell-optimized rotation using enhanced funnel shifter */
+DEV_INLINE uint64_t ROTR64(const uint64_t value, const int offset) {
+  uint2 result;
+  // Use optimized inline PTX for Blackwell architecture
+  if (offset < 32) {
+    asm("shf.r.wrap.b32 %0, %1, %2, %3;"
+        : "=r"(result.x)
+        : "r"(__double2loint(__longlong_as_double(value))),
+          "r"(__double2hiint(__longlong_as_double(value))), "r"(offset));
+    asm("shf.r.wrap.b32 %0, %1, %2, %3;"
+        : "=r"(result.y)
+        : "r"(__double2hiint(__longlong_as_double(value))),
+          "r"(__double2loint(__longlong_as_double(value))), "r"(offset));
+  } else {
+    asm("shf.r.wrap.b32 %0, %1, %2, %3;"
+        : "=r"(result.x)
+        : "r"(__double2hiint(__longlong_as_double(value))),
+          "r"(__double2loint(__longlong_as_double(value))), "r"(offset));
+    asm("shf.r.wrap.b32 %0, %1, %2, %3;"
+        : "=r"(result.y)
+        : "r"(__double2loint(__longlong_as_double(value))),
+          "r"(__double2hiint(__longlong_as_double(value))), "r"(offset));
+  }
+  return __double_as_longlong(__hiloint2double(result.y, result.x));
+}
+#elif __CUDA_ARCH__ >= 320 && USE_ROT_ASM_OPT == 1
 /* complicated sm >= 3.5 one (with Funnel Shifter beschleunigt), to bench */
 DEV_INLINE uint64_t ROTR64(const uint64_t value, const int offset) {
   uint2 result;
@@ -90,8 +125,33 @@ DEV_INLINE uint64_t ROTR64(const uint64_t x, const int offset) {
 #define ROTR64(x, n) (((x) >> (n)) | ((x) << (64 - (n))))
 #endif
 
-// 64-bit ROTATE LEFT
-#if __CUDA_ARCH__ >= 320 && USE_ROT_ASM_OPT == 1
+// 64-bit ROTATE LEFT - Optimized for different architectures
+#if defined(ARCH_BLACKWELL) && USE_ROT_ASM_OPT == 1
+/* Blackwell-optimized left rotation */
+DEV_INLINE uint64_t ROTL64(const uint64_t value, const int offset) {
+  uint2 result;
+  if (offset >= 32) {
+    asm("shf.l.wrap.b32 %0, %1, %2, %3;"
+        : "=r"(result.x)
+        : "r"(__double2loint(__longlong_as_double(value))),
+          "r"(__double2hiint(__longlong_as_double(value))), "r"(offset));
+    asm("shf.l.wrap.b32 %0, %1, %2, %3;"
+        : "=r"(result.y)
+        : "r"(__double2hiint(__longlong_as_double(value))),
+          "r"(__double2loint(__longlong_as_double(value))), "r"(offset));
+  } else {
+    asm("shf.l.wrap.b32 %0, %1, %2, %3;"
+        : "=r"(result.x)
+        : "r"(__double2hiint(__longlong_as_double(value))),
+          "r"(__double2loint(__longlong_as_double(value))), "r"(offset));
+    asm("shf.l.wrap.b32 %0, %1, %2, %3;"
+        : "=r"(result.y)
+        : "r"(__double2loint(__longlong_as_double(value))),
+          "r"(__double2hiint(__longlong_as_double(value))), "r"(offset));
+  }
+  return __double_as_longlong(__hiloint2double(result.y, result.x));
+}
+#elif __CUDA_ARCH__ >= 320 && USE_ROT_ASM_OPT == 1
 DEV_INLINE uint64_t ROTL64(const uint64_t value, const int offset) {
   uint2 result;
   if (offset >= 32) {

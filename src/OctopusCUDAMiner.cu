@@ -124,6 +124,17 @@ void OctopusCUDAMiner::Start() {
 void OctopusCUDAMiner::ThreadContext::InitCUDA() {
   checkCudaErrors(cudaSetDevice(device_id));
   checkCudaErrors(cudaMallocHost(&d_search_results, sizeof(SearchResults)));
+  
+  // Enable optimizations for RTX 5090 and newer architectures
+  cudaDeviceProp prop;
+  checkCudaErrors(cudaGetDeviceProperties(&prop, device_id));
+  
+  // Set L2 cache preference for better DAG access performance on Blackwell
+  if (prop.major >= 9) { // Blackwell and newer
+    checkCudaErrors(cudaDeviceSetCacheConfig(cudaFuncCachePreferL1));
+    // Enable persistent L2 cache for DAG data
+    checkCudaErrors(cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, prop.l2CacheSize));
+  }
 }
 
 void OctopusCUDAMiner::ThreadContext::InitPerEpoch(uint64_t blockHeight) {
@@ -136,16 +147,30 @@ void OctopusCUDAMiner::ThreadContext::InitPerEpoch(uint64_t blockHeight) {
   const uint32_t work = dagManager->dagSize / 8;
   const uint32_t run = miner->settings.initGridSize * INIT_BLOCK_SIZE;
 
+  // Use CUDA streams for better overlapping on RTX 5090
+  cudaStream_t stream1, stream2;
+  checkCudaErrors(cudaStreamCreate(&stream1));
+  checkCudaErrors(cudaStreamCreate(&stream2));
+
   uint32_t base;
   for (base = 0; base <= work - run; base += run) {
-    InitDagItems<<<miner->settings.initGridSize, INIT_BLOCK_SIZE>>>(base);
+    // Alternate between streams for better performance
+    cudaStream_t currentStream = (base / run) % 2 == 0 ? stream1 : stream2;
+    InitDagItems<<<miner->settings.initGridSize, INIT_BLOCK_SIZE, 0, currentStream>>>(base);
   }
   if (base < work) {
     const uint32_t lastGrid =
         ((work - base) + INIT_BLOCK_SIZE - 1) / INIT_BLOCK_SIZE;
-    InitDagItems<<<lastGrid, INIT_BLOCK_SIZE>>>(base);
+    InitDagItems<<<lastGrid, INIT_BLOCK_SIZE, 0, stream1>>>(base);
   }
-  checkCudaErrors(cudaDeviceSynchronize());
+  
+  // Synchronize both streams
+  checkCudaErrors(cudaStreamSynchronize(stream1));
+  checkCudaErrors(cudaStreamSynchronize(stream2));
+  
+  // Clean up streams
+  checkCudaErrors(cudaStreamDestroy(stream1));
+  checkCudaErrors(cudaStreamDestroy(stream2));
 }
 
 void OctopusCUDAMiner::ThreadContext::InitPerHeader(
@@ -180,7 +205,18 @@ void OctopusCUDAMiner::ThreadContext::InitPerHeader(
 void OctopusCUDAMiner::Work(ThreadContext *ctx) {
   ctx->InitCUDA();
 
-  const uint32_t searchGridSize = settings.searchGridSize;
+  // Adaptive grid size based on GPU architecture for optimal hashrate
+  cudaDeviceProp prop;
+  checkCudaErrors(cudaGetDeviceProperties(&prop, ctx->device_id));
+  
+  uint32_t searchGridSize = settings.searchGridSize;
+  // Optimize grid size for RTX 5090 and newer architectures
+  if (prop.major >= 9) { // Blackwell
+    searchGridSize = std::min(settings.searchGridSize * 2, (int)(prop.maxThreadsPerMultiProcessor * prop.multiProcessorCount / SEARCH_BLOCK_SIZE));
+  } else if (prop.major >= 8) { // Ampere
+    searchGridSize = std::min((int)(settings.searchGridSize * 1.5), (int)(prop.maxThreadsPerMultiProcessor * prop.multiProcessorCount / SEARCH_BLOCK_SIZE));
+  }
+  
   const uint32_t batchSize = searchGridSize * SEARCH_BLOCK_SIZE;
 
   std::string jobId;
@@ -212,9 +248,18 @@ void OctopusCUDAMiner::Work(ThreadContext *ctx) {
     volatile SearchResults &search_results =
         *reinterpret_cast<SearchResults *>(ctx->d_search_results);
     search_results.count = 0;
-    Compute<<<settings.searchGridSize, SEARCH_BLOCK_SIZE>>>(
+    
+    // Use CUDA stream for async kernel execution on RTX 5090
+    cudaStream_t computeStream;
+    checkCudaErrors(cudaStreamCreate(&computeStream));
+    
+    // Calculate dynamic shared memory size
+    size_t sharedMemSize = OCTOPUS_N * SEARCH_WARP_COUNT * sizeof(u32);
+    
+    Compute<<<searchGridSize, SEARCH_BLOCK_SIZE, sharedMemSize, computeStream>>>(
         nonce, reinterpret_cast<SearchResults *>(ctx->d_search_results));
-    checkCudaErrors(cudaDeviceSynchronize());
+    checkCudaErrors(cudaStreamSynchronize(computeStream));
+    checkCudaErrors(cudaStreamDestroy(computeStream));
 
     uint32_t found_count =
         std::min((uint32_t)search_results.count, MAX_SEARCH_RESULTS);

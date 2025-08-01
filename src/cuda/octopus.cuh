@@ -62,6 +62,14 @@ __device__ __forceinline__ bool chase_pointer(const u64 seed, u32* block_d) {
           offset[p] =
               fnv(init0[p] ^ (a + b) ^ warp_d[(a + b) * WARP_SIZE + (lid + p)], ((uint32_t *)&mix[p])[b]) % d_dag_size;
           offset[p] = SHFL(offset[p], t, THREADS_PER_HASH);
+          
+          // Use CUDA cache hint for better memory performance on RTX 5090
+          #if __CUDA_ARCH__ >= 900
+            asm("prefetch.global.L2 [%0];" :: "l"(&d_dag[offset[p]]));
+          #elif __CUDA_ARCH__ >= 320
+            asm("prefetch.global.L1 [%0];" :: "l"(&d_dag[offset[p]]));
+          #endif
+          
           mix[p] = fnv4(mix[p], d_dag[offset[p]].uint4s[thread_id]);
         }
       }
@@ -191,7 +199,9 @@ __device__ __forceinline__ u64 multi_eval(u64 start_nonce, u32* block_d) {
 
 __launch_bounds__(SEARCH_BLOCK_SIZE) __global__
     void Compute(u64 start_nonce, SearchResults *results) {
-  __shared__ u32 block_d[OCTOPUS_N * SEARCH_WARP_COUNT];
+  // Optimized shared memory allocation for RTX 5090
+  extern __shared__ u32 shared_mem[];
+  u32 *block_d = shared_mem;
 
   const u64 thread_result = multi_eval(start_nonce, block_d);
   if (chase_pointer(thread_result, block_d)) {

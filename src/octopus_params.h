@@ -30,9 +30,24 @@ static const u32 NODE_WORDS = OCTOPUS_HASH_BYTES / sizeof(int);
 static const u32 MIX_WORDS = OCTOPUS_MIX_BYTES / sizeof(int);
 static const u32 MIX_NODES = MIX_WORDS / NODE_WORDS;
 
-static const u32 INIT_BLOCK_SIZE = 128;
+// Thread block size optimization for different GPU architectures
+#ifdef __CUDA_ARCH__
+  #if (__CUDA_ARCH__ >= 900) // Blackwell (RTX 5090)
+    static const u32 INIT_BLOCK_SIZE = 256;  // Increased for better occupancy on Blackwell
+    static const u32 SEARCH_WARP_COUNT = 8;  // More warps per block for RTX 5090
+  #elif (__CUDA_ARCH__ >= 800) // Ampere (RTX 3080/3090)
+    static const u32 INIT_BLOCK_SIZE = 192;
+    static const u32 SEARCH_WARP_COUNT = 6;
+  #else // Older architectures
+    static const u32 INIT_BLOCK_SIZE = 128;
+    static const u32 SEARCH_WARP_COUNT = 4;
+  #endif
+#else
+  // Host compilation - use conservative values
+  static const u32 INIT_BLOCK_SIZE = 128;
+  static const u32 SEARCH_WARP_COUNT = 4;
+#endif
 
-static const u32 SEARCH_WARP_COUNT = 4;
 static const u32 SEARCH_BLOCK_SIZE = WARP_SIZE * SEARCH_WARP_COUNT;
 
 // #define OCTOPUS_DEBUG

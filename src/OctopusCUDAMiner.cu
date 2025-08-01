@@ -132,8 +132,22 @@ void OctopusCUDAMiner::ThreadContext::InitCUDA() {
   // Set L2 cache preference for better DAG access performance on Blackwell
   if (prop.major >= 9) { // Blackwell and newer
     checkCudaErrors(cudaDeviceSetCacheConfig(cudaFuncCachePreferL1));
+    
     // Enable persistent L2 cache for DAG data
-    checkCudaErrors(cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, prop.l2CacheSize));
+    // Note: cudaLimitPersistingL2CacheSize is only available in CUDA 11.2+ and requires compute capability 8.0+
+#ifdef cudaLimitPersistingL2CacheSize
+    if (prop.major >= 8) { // Ampere and newer architectures that support persistent L2 cache
+      cudaError_t err = cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, prop.l2CacheSize);
+      if (err != cudaSuccess) {
+        // Feature not supported on this hardware/driver combination, continue without it
+        fprintf(stderr, "Warning: Persistent L2 cache not supported on this system (error %d), continuing without optimization\n", err);
+        cudaGetLastError(); // Clear the error state
+      }
+    }
+#else
+    // Feature not available in this CUDA version, skip optimization
+    fprintf(stderr, "Info: Persistent L2 cache optimization not available in this CUDA version\n");
+#endif
   }
 }
 

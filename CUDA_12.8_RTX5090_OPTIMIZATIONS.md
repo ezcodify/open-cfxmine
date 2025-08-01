@@ -80,7 +80,15 @@ cmake --build build
 if (prop.major >= 9) { // Blackwell
   searchGridSize = min(settings.searchGridSize * 2, 
                       (prop.maxThreadsPerMultiProcessor * prop.multiProcessorCount / SEARCH_BLOCK_SIZE));
-  cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, prop.l2CacheSize);
+  // Note: Persistent L2 cache feature requires CUDA 11.2+ and compute capability 8.0+
+#ifdef cudaLimitPersistingL2CacheSize
+  if (prop.major >= 8) {
+    cudaError_t err = cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, prop.l2CacheSize);
+    if (err != cudaSuccess) {
+      // Feature not supported, continue without optimization
+    }
+  }
+#endif
 }
 ```
 
